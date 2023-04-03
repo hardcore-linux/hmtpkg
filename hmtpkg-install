@@ -1,0 +1,180 @@
+#!/bin/sh
+# Installation script for hmtpkg
+
+# Usage:
+# hmtpkg-install [-h --help] [-v --version] [-r --root] [-c --config] [-S --sync] <packages>
+# -h, --help: Display this help message and exit
+# -v, --version: display the version 
+# -r, --root: specify a custom root directory to install into
+# -c, --config: specify a custom config directory
+# -S, --sync: sync repos
+# -u, --upgrade: update packages
+# -y, --yes: yes to all questions
+# -d, --dbdir: custom database dir
+set -e
+options=$(getopt -o hvr:c:Suy -l help,version,root:,config:,sync,upgrade,yes -- "$@")
+#echo $options
+eval set -- "$options"
+sync=0
+upgrade=0
+install=0
+yes=0
+root="/"
+configdir="/etc/hmtpkg.d"
+dbdir="/var/lib/hmtpkg"
+while true; do
+	case "$1" in 
+	-h | --help)
+		echo "Usage: hmtpkg-install [-h --help] [-v --version] [-r --root] [-c --config] [-S --sync] [-u --upgrade] [-y --yes] [-d --dbdir] <packages>"
+		exit 0
+		;;
+	-v | --version)
+		echo "Version: hmtpkg version 0.1.0"
+		exit 0
+		;;
+	-r | --root)
+		shift;
+	 	root=$1
+		;;
+	-c | --config)
+		shift;
+		configdir=$1
+		;;
+	-d | --dbdir)
+		shift;
+		dbdir=$1
+		;;
+	-S | --sync)
+		sync=1
+		;;
+	-u | --upgrade)
+		upgrade=1
+		;;
+	-y | --yes)
+		yes=1
+		;;
+	--)
+		shift
+		break
+		;;
+	esac
+	shift
+done
+shift $((OPTIND-1))
+pkgs=""
+while [ $# -gt 0 ]; do
+	install=1
+	pkgs="$pkgs $1"
+	shift
+done
+#echo "pkgs=$pkgs"
+#echo "$upgrade $install $sync"
+mkdir -p $dbdir/db
+mkdir -p $dbdir/db/local
+mkdir -p $dbdir/db/remote
+mkdir -p $dbdir/tmp
+is_file() {
+	firstchar="$(echo $1 | cut -c 1)"
+	[ "$firstchar" = "/" ] || [ "$firstchar" = "." ]
+	return $?
+}
+# Step one: sync
+if [ $sync -eq 1 ]; then 
+	for repo in $(cat $configdir/repos); do
+		if is_file $repo; then
+			data="$(cat $repo/index)"
+		else
+			data="$(wget -O - $repo/index)"
+		fi
+		isver=0
+		pkg=""
+		for x in data; do
+			if [ $isver -eq 1 ]; then
+				mkdir -p $dbdir/db/remote/versions/$pkg
+				rm $dbdir/db/remote/versions/$pkg/*
+				touch $dbdir/db/remote/versions/$pkg/$x
+				echo $repo > $dbdir/db/remote/mirrors/$pkg/$x
+				isver=0
+			else
+				pkg="$x"
+				isver=1
+			fi
+		done
+	done
+fi
+# Step two: upgrade
+upgradelist=""
+upgradeversions=""
+if [ $upgrade -eq 1 ]; then
+	for p in $dbdir/db/local/versions/*; do
+		package="$(basename $p)"
+		localver="$(basename $(echo $dbdir/db/local/versions/$package/* | cut -d ' ' -f 1))"
+		remotever="$(basename $(echo $dbdir/db/remote/versions/$package/* | cut -d ' ' -f 1))"
+		if [ -e $dbdir/db/local/versions/$package ] && [ "$(echo -e "$localver\n$remotever" | sort -V | cut -d ' ' -f 1)" = "$localver" ]; then
+			upgradelist="$upgradelist $package"
+			upgradeversions="$upgradeversions $remotever"
+		fi
+	done
+fi
+# Step three: Do install!
+list="$pkgs $upgradelist"
+pkgversions=""
+for pkg in $pkgs; do
+	version="$(basename $(echo $dbdir/db/remote/versions/$pkg/* | cut -d ' ' -f 1))"
+	pkgversions="$pkgversions $version"
+done
+versions="$pkgversions $upgradeversions"
+echo "Packages to be downloaded: $list"
+if [ $yes -eq 1 ]; then
+	REPLY="y"
+else 
+	read -p "Install? (Y/n) "
+fi
+
+if [ $REPLY = "y" ]; then
+	#echo $versions
+	eval set -- $versions
+	echo "Downloading packages..."
+	mkdir -p $dbdir/tmp
+	cd $dbdir/tmp
+	for pkg in $list; do
+		echo "Downloading $pkg"
+		mkdir -p $pkg
+		cd $pkg
+		#echo $pkg $1
+		#echo cat $dbdir/db/remote/mirrors/$pkg/$1
+		mirror=$(cat $dbdir/db/remote/mirrors/$pkg/$1)
+		if is_file $mirror; then
+			cp $mirror/packages/$pkg/$pkg.tar.gz $pkg.tar.gz
+			cp $mirror/packages/$pkg/$pkg.tar.gz.sig $pkg.tar.gz.sig
+			cp $mirror/packages/$pkg/SHA256SUMS SHA256SUMS
+		else
+			wget $mirror/packages/$pkg/$pkg.tar.gz
+			wget $mirror/packages/$pkg/$pkg.tar.gz.sig
+			wget $mirror/packages/$pkg/SHA256SUMS
+		fi
+		install=1
+		if sha256sum -c SHA256SUMS; then
+			echo "sha256sums for $pkg are ok"
+		else
+			echo "ERROR: sha256sums do not match. There could have been an error in the transfer or something malicious could be happening."
+			install=0
+		fi
+		if gpg --verify $pkg.tar.gz.sig $pkg.tar.gz; then
+			echo "GPG verification is ok"
+		else
+			echo "Failed to verify with GPG; refusing to install."
+			install=0
+		fi
+		if [ $install -eq 1 ]; then
+			echo "Unpacking $pkg.tar.gz to $root..."
+			echo tar --strip-components=1 -C $root -xvf $pkg.tar.gz datia
+			tar --strip-components=1 -C $root -xvf $pkg.tar.gz data
+			echo "Installation for $pkg version $1 ok."
+		fi
+		shift
+	done
+else
+	echo "Installation aborted."
+fi
+

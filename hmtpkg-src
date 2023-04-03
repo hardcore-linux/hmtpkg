@@ -1,0 +1,94 @@
+#!/bin/sh
+# Usage: hmtpkg-src <directory> [--gpg-options <gpg options>] [-h --help] 
+# Generates a .hmtpkg package from a directory with a HMTPKGBUILD script
+# .hmtpkg packages are gzipped tar archives with the following contents:
+# data: a directory with all files that will be unpacked into the root directory
+# metadata: a directory with metadata like HMTPKGBUILD
+exit_error() {
+	echo $1
+	exit 1
+}
+options=$(getopt -o h -l help,gpg-options: -- "$@")
+if [ $? != 0 ]; then echo "getopt failed"; exit 1; fi
+eval set -- "$options"
+while true; do
+	case "$1" in
+	-h | --help)
+		echo "Usage: hmtpkg-src <directory> [--gpg-options <gpg options>] [-h --help]"
+		exit 0
+		;;
+	--gpg-options)
+		shift;
+		gpg_options="$1"
+		;;
+	--)
+		shift;
+		break;
+		;;
+	esac
+	shift
+done
+shift $(($OPTIND-1))
+directory="$1"
+if [ -z "$directory" ]; then
+	echo "Error: directory not specified"
+	exit 1
+fi
+cd $directory
+origdir=$PWD
+SRCFILEDIR="$PWD/sources"
+mkdir -p $SRCFILEDIR
+echo "sourcing HMTPKGBUILD..."
+alias download="wget"
+. ./HMTPKGBUILD
+echo "downloading sources..."
+cd $SRCFILEDIR
+for source in $srcfiles; do
+	download $source || exit_error "failed to download $source"
+	tar -xf $(basename $source) || exit_error "failed to extract $(basename $source)"
+done
+cd $origdir
+echo "running prepare..."
+prepare || exit_error "failed to prepare for build"
+cd $origdir
+echo "building..."
+build || exit_error "failed to build"
+echo "building final installation..."
+#cd "$origdir"
+DESTDIR="$origdir/data"
+mkdir -p $DESTDIR
+echo $DESTDIR
+do_install
+echo "bundling as .tar.gz..."
+cd $origdir
+mkdir -p out
+cd out
+cp -r ../data data
+echo "fix permissions..."
+cd data
+chown -R 0:0 *
+cd ..
+echo "add metadata"
+mkdir -p metadata
+cp ../HMTPKGBUILD metadata/HMTPKGBUILD
+echo "running packaging phase hooks..."
+PKGDIR=$origdir/out
+cd $origdir
+packaging || exit_error "failed to run packaging phase hooks"
+set -e
+cd $origdir
+echo "compress to .tar.gz"
+cd $PKGDIR
+tar -czvf "../$name.tar.gz" *
+cd $origdir
+echo "signing $name.tar.gz..."
+#echo gpg "$gpg_options" --output $name.tar.gz.sig --detach-sig $name.tar.gz 
+#sh -c 'gpg "$gpg_options" --output $name.tar.gz.sig --detach-sig $name.tar.gz'
+if [ -z "$gpg_options" ]; then
+	gpg --output $name.tar.gz.sig --detach-sig $name.tar.gz
+else
+	gpg $gpg_options --output $name.tar.gz.sig --detach-sig $name.tar.gz
+fi
+echo "creating sha256 hash..."
+sha256sum $name.tar.gz $name.tar.gz.sig > SHA256SUMS
+echo "packaging done"
